@@ -268,7 +268,7 @@ function widget:GameFrame(frameNum)
               alert.name     = allyName
               alert.resType  = "energy"
               alert.amount   = CONFIG.energyShareAmount
-              alert.label    = format("⚡ %s lacks Energy!", allyName)
+              alert.label    = format("[E] %s lacks Energy!", allyName)
               alert.btnLabel = format("+%d E", CONFIG.energyShareAmount)
             end
           end
@@ -287,7 +287,7 @@ function widget:GameFrame(frameNum)
               alert.name     = allyName
               alert.resType  = "metal"
               alert.amount   = CONFIG.metalShareAmount
-              alert.label    = format("⚙️ %s lacks Metal!", allyName)
+              alert.label    = format("[M] %s lacks Metal!", allyName)
               alert.btnLabel = format("+%d M", CONFIG.metalShareAmount)
             end
           end
