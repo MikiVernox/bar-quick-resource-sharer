@@ -32,39 +32,6 @@ function widget:GetInfo()
 end
 
 -- =========================================================================
--- LOCALIZED ENGINE & LUA FUNCTIONS (Performance / Fast JIT dispatch)
--- =========================================================================
-local spGetMyTeamID          = Spring.GetMyTeamID
-local spGetMyAllyTeamID      = Spring.GetMyAllyTeamID
-local spGetTeamResources     = Spring.GetTeamResources
-local spGetTeamList          = Spring.GetTeamList
-local spGetTeamInfo          = Spring.GetTeamInfo
-local spGetPlayerInfo        = Spring.GetPlayerInfo
-local spShareResources       = Spring.ShareResources
-local spGetGameSeconds       = Spring.GetGameSeconds
-local spGetSpectatingState   = Spring.GetSpectatingState
-local spGetMouseState        = Spring.GetMouseState
-local spGetViewGeometry      = Spring.GetViewGeometry
-local spEcho                 = Spring.Echo
-
-local glColor                = gl.Color
-local glRect                 = gl.Rect
-local glText                 = gl.Text
-local glLineWidth            = gl.LineWidth
-local glPolygonMode          = gl.PolygonMode
-
-local GL_FRONT_AND_BACK      = GL.FRONT_AND_BACK
-local GL_LINE                = GL.LINE
-local GL_FILL                = GL.FILL
-
-local format                 = string.format
-local floor                  = math.floor
-local max                    = math.max
-local min                    = math.min
-local tostring               = tostring
-local ipairs                 = ipairs
-
--- =========================================================================
 -- CONFIGURATION
 -- =========================================================================
 local CONFIG = {
@@ -99,8 +66,45 @@ local CONFIG = {
 }
 
 -- =========================================================================
--- RUNTIME STATE & PRE-ALLOCATED DATA (Zero Garbage Collection overhead)
+-- LOCALIZED ENGINE & LUA FUNCTIONS (Performance / Fast JIT dispatch)
 -- =========================================================================
+local spGetMyTeamID          = Spring.GetMyTeamID
+local spGetMyAllyTeamID      = Spring.GetMyAllyTeamID
+local spGetTeamResources     = Spring.GetTeamResources
+local spGetTeamList          = Spring.GetTeamList
+local spGetTeamInfo          = Spring.GetTeamInfo
+local spGetPlayerInfo        = Spring.GetPlayerInfo
+local spGetAIInfo            = Spring.GetAIInfo
+local spShareResources       = Spring.ShareResources
+local spGetGameSeconds       = Spring.GetGameSeconds
+local spGetSpectatingState   = Spring.GetSpectatingState
+local spGetMouseState        = Spring.GetMouseState
+local spGetViewGeometry      = Spring.GetViewGeometry
+local spEcho                 = Spring.Echo
+
+local glColor                = gl.Color
+local glRect                 = gl.Rect
+local glText                 = gl.Text
+local glLineWidth            = gl.LineWidth
+local glPolygonMode          = gl.PolygonMode
+
+local GL_FRONT_AND_BACK      = GL.FRONT_AND_BACK
+local GL_LINE                = GL.LINE
+local GL_FILL                = GL.FILL
+
+local format                 = string.format
+local floor                  = math.floor
+local max                    = math.max
+local min                    = math.min
+local tostring               = tostring
+local ipairs                 = ipairs
+
+-- =========================================================================
+-- PRE-COMPUTED CONSTANTS & CACHES (Zero runtime allocation)
+-- =========================================================================
+local LABEL_BTN_ENERGY = format("+%d E", CONFIG.energyShareAmount)
+local LABEL_BTN_METAL  = format("+%d M", CONFIG.metalShareAmount)
+
 local myTeamID          = nil
 local myAllyTeamID      = nil
 local isSpectator       = false
@@ -117,8 +121,9 @@ local dragOffsetY       = 0
 -- Snooze table: snoozedTeams[teamID][resType] = expireTimestamp
 local snoozedTeams      = {}
 
--- Cached player names to avoid frequent string allocations
-local playerNameCache   = {}
+-- Cached player info records to eliminate runtime string concatenations
+-- Schema: playerRecordCache[teamID] = { name = "...", energyLabel = "...", metalLabel = "..." }
+local playerRecordCache = {}
 
 -- Pre-allocated alert pool to achieve zero table allocations in GameFrame
 local alertPool         = {}
@@ -138,6 +143,16 @@ local function GetPooledAlert(index)
     alertPool[index] = alert
   end
   return alert
+end
+
+local function RemoveAlertByIndex(index)
+  if index < 1 or index > activeAlertsCount then return end
+  local target = alertPool[index]
+  for i = index, activeAlertsCount - 1 do
+    alertPool[i] = alertPool[i + 1]
+  end
+  alertPool[activeAlertsCount] = target
+  activeAlertsCount = activeAlertsCount - 1
 end
 
 -- =========================================================================
@@ -160,7 +175,7 @@ function widget:Shutdown()
   alertPool = {}
   activeAlertsCount = 0
   snoozedTeams = {}
-  playerNameCache = {}
+  playerRecordCache = {}
 end
 
 function widget:ViewResize(newX, newY)
@@ -173,12 +188,17 @@ end
 -- =========================================================================
 -- HELPER FUNCTIONS
 -- =========================================================================
-local function ResolvePlayerName(teamID, leader)
-  local cached = playerNameCache[teamID]
+local function ResolvePlayerRecord(teamID, leader, isAi)
+  local cached = playerRecordCache[teamID]
   if cached then return cached end
 
   local name = nil
-  if leader and leader >= 0 then
+  if isAi and spGetAIInfo then
+    local _, aiName = spGetAIInfo(teamID)
+    if aiName and aiName ~= "" then
+      name = "AI: " .. aiName
+    end
+  elseif leader and leader >= 0 then
     name = spGetPlayerInfo(leader)
   end
 
@@ -186,8 +206,13 @@ local function ResolvePlayerName(teamID, leader)
     name = "Team " .. tostring(teamID)
   end
 
-  playerNameCache[teamID] = name
-  return name
+  cached = {
+    name        = name,
+    energyLabel = "[E] " .. name .. " lacks Energy!",
+    metalLabel  = "[M] " .. name .. " lacks Metal!"
+  }
+  playerRecordCache[teamID] = cached
+  return cached
 end
 
 local function IsAlertSnoozed(teamID, resType, now)
@@ -210,7 +235,6 @@ end
 -- RESOURCE TRANSFER ACTION
 -- =========================================================================
 local function ExecuteResourceShare(teamID, resType, amount, allyName)
-  -- Double check local reserves before transmitting
   local currentLevel = spGetTeamResources(myTeamID, resType)
   if not currentLevel or currentLevel < amount then
     spEcho(format("[Resource Sharer] Cannot share: insufficient %s reserves.", resType))
@@ -220,7 +244,7 @@ local function ExecuteResourceShare(teamID, resType, amount, allyName)
   spShareResources(teamID, resType, amount)
   spEcho(format("[Resource Sharer] Sent %d %s to %s.", amount, resType, allyName))
 
-  -- Automatically snooze for 5 seconds after sending to prevent accidental double-clicks
+  -- Snooze for 5 seconds to prevent accidental duplicate clicks
   SetAlertSnoozed(teamID, resType, 5)
 end
 
@@ -240,6 +264,12 @@ function widget:GameFrame(frameNum)
   myAllyTeamID = spGetMyAllyTeamID()
   if not myTeamID or not myAllyTeamID then return end
 
+  local _, _, myDead = spGetTeamInfo(myTeamID)
+  if myDead then
+    activeAlertsCount = 0
+    return
+  end
+
   local now = spGetGameSeconds()
   local myEnergy, myEStorage = spGetTeamResources(myTeamID, "energy")
   local myMetal, myMStorage   = spGetTeamResources(myTeamID, "metal")
@@ -253,23 +283,22 @@ function widget:GameFrame(frameNum)
     if teamID ~= myTeamID then
       local _, leader, isDead, isAi = spGetTeamInfo(teamID)
       if not isDead then
-        local allyName = ResolvePlayerName(teamID, leader)
+        local record = ResolvePlayerRecord(teamID, leader, isAi)
 
         -- 1. Evaluate Energy Stall
         if not IsAlertSnoozed(teamID, "energy", now) then
           local eCur, eStor, _, eInc, eExp = spGetTeamResources(teamID, "energy")
           if eCur and eStor and eExp and eInc and (eExp > eInc) and
              (eCur < CONFIG.energyStallThreshold or eCur < eStor * CONFIG.energyStallRatio) then
-            -- Verify local surplus safety margin
             if myEnergy and myEnergy >= CONFIG.myMinEnergyReserve and myEnergy >= (CONFIG.energyShareAmount * 1.5) then
               count = count + 1
               local alert = GetPooledAlert(count)
               alert.teamID   = teamID
-              alert.name     = allyName
+              alert.name     = record.name
               alert.resType  = "energy"
               alert.amount   = CONFIG.energyShareAmount
-              alert.label    = format("[E] %s lacks Energy!", allyName)
-              alert.btnLabel = format("+%d E", CONFIG.energyShareAmount)
+              alert.label    = record.energyLabel
+              alert.btnLabel = LABEL_BTN_ENERGY
             end
           end
         end
@@ -279,16 +308,15 @@ function widget:GameFrame(frameNum)
           local mCur, mStor, _, mInc, mExp = spGetTeamResources(teamID, "metal")
           if mCur and mStor and mExp and mInc and (mExp > mInc) and
              (mCur < CONFIG.metalStallThreshold or mCur < mStor * CONFIG.metalStallRatio) then
-            -- Verify local surplus safety margin
             if myMetal and myMetal >= CONFIG.myMinMetalReserve and myMetal >= (CONFIG.metalShareAmount * 1.5) then
               count = count + 1
               local alert = GetPooledAlert(count)
               alert.teamID   = teamID
-              alert.name     = allyName
+              alert.name     = record.name
               alert.resType  = "metal"
               alert.amount   = CONFIG.metalShareAmount
-              alert.label    = format("[M] %s lacks Metal!", allyName)
-              alert.btnLabel = format("+%d M", CONFIG.metalShareAmount)
+              alert.label    = record.metalLabel
+              alert.btnLabel = LABEL_BTN_METAL
             end
           end
         end
@@ -332,10 +360,11 @@ function widget:DrawScreen()
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
     glRect(posX, y, posX + baseWidth, y + baseHeight)
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+    glLineWidth(1.0) -- Restore OpenGL default line width
 
-    -- Information Text
+    -- Information Text (vertically centered using "ov")
     glColor(0.95, 0.95, 0.95, 1.0)
-    glText(alert.label, posX + 8, y + 10, 11, "o")
+    glText(alert.label, posX + 8, y + (baseHeight * 0.5), 11, "ov")
 
     -- Share Button coordinates
     local btnX = posX + baseWidth - btnW - CONFIG.btnPaddingRight
@@ -358,9 +387,9 @@ function widget:DrawScreen()
     end
     glRect(btnX, btnY, btnX + btnW, btnY + btnH)
 
-    -- Button Label
+    -- Button Label (centered horizontally and vertically using "ocv")
     glColor(0.05, 0.05, 0.05, 1.0)
-    glText(alert.btnLabel, btnX + (btnW * 0.5), btnY + 4, 11, "oc")
+    glText(alert.btnLabel, btnX + (btnW * 0.5), btnY + (btnH * 0.5), 11, "ocv")
 
     -- Dismiss [x] Button
     local disX = posX + baseWidth - disW - 4
@@ -376,10 +405,10 @@ function widget:DrawScreen()
 
     -- Dismiss Label
     glColor(0.85, 0.85, 0.85, 1.0)
-    glText("x", disX + (disW * 0.5), disY + 3, 11, "oc")
+    glText("x", disX + (disW * 0.5), disY + (btnH * 0.5), 11, "ocv")
   end
 
-  -- Restore OpenGL color state
+  -- Restore OpenGL state
   glColor(1.0, 1.0, 1.0, 1.0)
 end
 
@@ -409,6 +438,7 @@ function widget:MousePress(mx, my, button)
         -- Action: Share Resource Button Clicked
         if mx >= btnX and mx <= btnX + btnW and my >= btnY and my <= btnY + btnH then
           ExecuteResourceShare(alert.teamID, alert.resType, alert.amount, alert.name)
+          RemoveAlertByIndex(i) -- Immediate UI removal for instant feedback
           return true
         end
 
@@ -418,6 +448,7 @@ function widget:MousePress(mx, my, button)
         if mx >= disX and mx <= disX + disW and my >= disY and my <= disY + btnH then
           SetAlertSnoozed(alert.teamID, alert.resType, CONFIG.snoozeDurationSec)
           spEcho(format("[Resource Sharer] Snoozed %s alerts for %s (%ds).", alert.resType, alert.name, CONFIG.snoozeDurationSec))
+          RemoveAlertByIndex(i) -- Immediate UI removal for instant feedback
           return true
         end
 
