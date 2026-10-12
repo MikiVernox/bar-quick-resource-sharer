@@ -1,0 +1,10 @@
+{
+  "id": "gui_quick_resource_sharer",
+  "version": "1.0.0",
+  "display_name": "Quick Ally Resource Sharer",
+  "author": "MikiVernox",
+  "discord_link": "",
+  "github_link": "https://github.com/MikiVernox/bar-quick-resource-sharer",
+  "description": "Shows on-screen alerts and 1-click buttons to share energy or metal when teammates are stalling.",
+  "last_updated": "2026-10-12T00:00:00.000Z"
+}
