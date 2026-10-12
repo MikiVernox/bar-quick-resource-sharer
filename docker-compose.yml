@@ -1,0 +1,9 @@
+services:
+  builder:
+    image: ghcr.io/beyond-all-reason/bar-workshop-builder:latest
+    container_name: bar-workshop-builder
+    profiles:
+      - tool
+    volumes:
+      - ./build:/app/build:z
+      - .:/app/Widgets:ro,z
